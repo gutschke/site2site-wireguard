@@ -1,0 +1,63 @@
+#!/bin/bash -e
+
+# Usage: [ifc] [description] [parameters] {[pubkey]}
+
+ifc="${1:-wg0}"
+[ -z "$1" ] || shift
+
+parameters=
+while :; do
+  if [ -n "$*" ]; then
+    case "$2" in
+      endpoint=*|target=*|reverse) name="$1"; shift; parameters="$*";;
+      *) name="$*";;
+    esac
+    if [[ "${parameters}" =~ "endpoint=" ]]; then
+      pubkey="${parameters#* }"
+      parameters="${parameters%% *}"
+    fi
+    set x; shift
+  else
+    echo -n "Name of peer: "
+    read -r name
+    echo
+    cat <<EOF
+Request a "reverse" connection to allow a remote server to share its own
+network connection by establishing an incoming WireGuard connection to us.
+
+Set up an "endpoint=" to actively initiate an outgoing tunnel to another
+WireGuard server.
+
+Set a "target=" to route an incoming tunnel through another pre-existing
+tunnel. The latter should be the index (starting at one) of either a
+reverse or forward WireGuard connection that was previously established.
+
+Leave parameters blank for regular incoming tunnels that should use our
+default route.
+
+EOF
+    echo -n "Parameters (reverse{=default-route}, endpoint=..., target=...): "
+    read -r parameters
+    if [[ "${parameters}" =~ "endpoint=" ]]; then
+      echo -n "Public key of endpoint: "
+      read -r pubkey
+    fi
+  fi
+  [ -n "${name%% }" ] || continue
+  [[ "${name}" =~ "," ]] && {
+    echo "Cannot have comma in name"
+    continue
+  } || :
+  break
+done
+
+key="${pubkey:-$(wg genkey)}"
+if grep '^DELETED,' "/etc/wireguard/${ifc}.peers" >&/dev/null; then
+  sed -i "0,/^DELETED,/s%^DELETED,.*%${name//%/\%}, ${key}${parameters:+, ${parameters}}%" "/etc/wireguard/${ifc}.peers"
+else
+  printf "%s, ${key}%s\n" "${name}" "${parameters:+, ${parameters}}" \
+         >>"/etc/wireguard/${ifc}.peers"
+fi
+/etc/wireguard/config-all-peers "${ifc}" "/etc/wireguard/${ifc}.peers" <(echo "${key}")
+echo
+show-peer "${key}" "${ifc}"

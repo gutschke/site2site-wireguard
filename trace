@@ -1,0 +1,26 @@
+#!/bin/bash -e
+export LC_ALL=C
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+
+trap 'trap "" INT TERM QUIT HUP EXIT ERR
+      nft delete table inet tracing
+      exit 1' INT TERM QUIT HUP EXIT ERR
+
+nft -f- <<EOF
+table inet tracing {
+  chain in {
+    type filter hook prerouting priority -401; policy accept;
+    iifname { wg0, wg0p1 } meta nftrace set 1 counter
+  }
+  chain out {
+    type filter hook forward priority -401; policy accept;
+    oifname { wg0, wg0p1 } meta nftrace set 1 counter
+  }
+}
+EOF
+
+nft monitor
+
+nft delete table inet tracing
+trap '' INT TERM QUIT HUP EXIT ERR
+exit 0

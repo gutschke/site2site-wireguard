@@ -1,0 +1,148 @@
+#!/bin/bash -e
+
+# This script configures AllowedIPs and PublicKey entries for all peers of
+# given WireGuard interface. It obtains this information from a *.peer file.
+# It also informs the firewall about the new configuration and make changes
+# to the host's network configuration if necessary. Most notably, that includes
+# the creation of auxiliary WireGuard interfaces of the form wgXpY. Make sure
+# to open firewall ports for these interfaces.
+
+# The first argument is the WireGuard interface that needs to be set up.
+# The second argument is a *.peers file listing all our configured peers.
+# The optional third arguments restricts configuration to a single peer only.
+[ -z "$3" ] && sel= || sel="$(cat <"$3")"
+
+# Find all the addresses assigned to our WireGuard interface
+addrs=
+while read idx ifc family addr _; do
+  eval $(ipcalc-ng -a "${addr}")
+  addrs="${addrs},$(sed 's/\([.:]\)[^.:]*$/\1$i/' <<<"${ADDRESS}")"
+done < <(ip -o a s dev "$1")
+
+# Find configuration parameters for WireGuard interface
+port=
+privkey=
+while read -r l; do
+  case "${l}" in
+    ListenPort*) port="${l##*= }";;
+    PrivateKey*) privkey="${l##*= }";;
+    *Peer*) break;;
+  esac
+done < <(wg showconf "$1")
+
+# Iterate over the list of peers. Each peer gets assigned a sequentially
+# increasing IP address in the order of how the peers appear in the *.peer file.
+# Old unused entries are marked as "DELETED" and will be skipped.
+i=0
+[ -r "$2" ] || touch "$2"
+while read -r x; do
+  x="$(sed 's/\s*#.*$//;s/^\s*//' <<<"${x}")"
+  [ -n "${x}" ] || continue
+
+  # Get next entry from *.peers file
+  name="$(sed 's/^\s*//;s/\s*$//' <<<"${x%%,*}")"
+  key="$(sed 's/^\s*//;s/,.*//;s/\s*$//' <<<"${x#*,}")"
+  parameters="$(sed 's/^[^,]*,\?//;s/^\s*//;s/\s*$//' <<<"${x#*,}")"
+  i=$((i+1))
+
+  # Insert $i into all of the IP addresses for this interface
+  eval a=${addrs#,}
+
+  # If this is a valid (or selected) peer, updated its settings
+  [ "DELETED" = "${name}" -o -n "${sel}" -a "${key}" != "${sel}" ] || {
+    # Enter the source IP addresses into firewall tables, so that we
+    # can track the connection that a packet arrived on.
+    mark="$(printf '0xFF%02X%04X' "${1#wg}" "${i}")"
+    table="$((8000+100*${1#wg}+i))"
+    for addr in ${a//,/ }; do
+      if [[ "${addr}" =~ : ]]; then
+        nft add element ip6 "$1-fwmark" addr2mark { "${addr}" : "${mark}" } || :
+      else
+        nft add element ip "$1-fwmark" addr2mark { "${addr}" : "${mark}" } || :
+      fi
+    done >&/dev/null
+
+    ifc="$1"
+    if [[ "${parameters}" =~ ^"reverse"   ]] ||
+       [[ "${parameters}" =~ ^"endpoint=" ]]; then
+      # Tunnels between networks require an auxilary interface of the form
+      # "wgXpY". They than listen on their own port number for an
+      # incoming connection, so the firewall needs to be made aware of this.
+      # If only outgoing tunnels are needed, an emphemeral port is used
+      # instead. Notably, this interface does not get assigned an IP address.
+      # Manually-added routing entries redirect traffic to the peer's
+      # host address, so that they will go to "wgXpY" instead of "wgX".
+      ifc="${ifc}p${i}"
+      ip link del "${ifc}" type wireguard >&/dev/null || :
+      ip link add "${ifc}" type wireguard
+      nft add element ip  "$1-fwmark" ifc2mark { "${ifc}" : "${mark}" } \
+          >&/dev/null || :
+      nft add element ip6 "$1-fwmark" ifc2mark { "${ifc}" : "${mark}" } \
+          >&/dev/null || :
+
+      # Configure the WireGuard parameters and a single peer.
+      derivedkey="$(openssl dgst -binary -sha256 <<<"${privkey}${ifc}" |
+                    openssl base64)"
+      lp=; ep=; [[ "${parameters}" =~ ^"reverse" ]] &&
+        lp="listen-port $((port+i))" || ep="endpoint ${parameters#*=}"
+      wg set "${ifc}" ${lp} \
+                      private-key <(echo "${derivedkey}") \
+                      peer "$(wg pubkey <<<"${key}")" \
+                      ${ep} \
+                      persistent-keepalive 50 \
+                      allowed-ips 0.0.0.0/0,::/0
+
+      # Set up network configuration to forward traffic through this interface.
+      ip link set mtu 1420 up dev "${ifc}"
+      for addr in ${a//,/ }; do
+        ip route add "${addr}" dev "${ifc}" >&/dev/null || :
+      done
+      echo 1 >/proc/sys/net/ipv4/conf/"${ifc}"/forwarding
+      echo 0 >/proc/sys/net/ipv4/conf/"${ifc}"/rp_filter
+      [[ "${parameters}" =~ "endpoint=" ]] &&
+        ping -W0.001 -c1 -I"${ifc}" 1.1.1.1 >&/dev/null || :
+    else
+      # A regular peer is much easier to configure. It uses the primary "wgX"
+      # interface and only needs to add a new peer definition for each tunnel.
+      wg set "${ifc}" peer "$(wg pubkey <<<"${key}")" \
+                      persistent-keepalive 50 \
+                      allowed-ips "${a}"
+    fi
+
+    # Blackhole any packets that are supposed to go to a specific target, but
+    # that somehow managed to escape and got routed to the default interface.
+    # This should never happen.
+    # Then add policy routing rules to route some tunnels through a particular
+    # exit node.
+    if [[ "${parameters}" =~ ^"target="(.*) ]]; then
+      verdict="drop"
+      target="${BASH_REMATCH[1]}"
+    else
+      verdict="accept"
+      target="${i}"
+    fi
+    if [[ "${parameters}" =~ ^"target="   ]] ||
+       [[ "${parameters}" =~ ^"endpoint=" ]] ||
+       [[ "${parameters}" =~ ^"reverse"   ]]; then
+      ip -4 rule del fwmark "${mark}" lookup "${table}" >&/dev/null || :
+      ip -6 rule del fwmark "${mark}" lookup "${table}" >&/dev/null || :
+      ip -4 rule add fwmark "${mark}" lookup "${table}"
+      ip -6 rule add fwmark "${mark}" lookup "${table}"
+      ip -4 route add table "${table}" default dev "$1p${target}" >&/dev/null||:
+      ip -6 route add table "${table}" default dev "$1p${target}" >&/dev/null||:
+    fi
+    nft add element ip  "$1-fwmark" blackhole { $((0xFF000000 + i)) : \
+        "${verdict}" } >&/dev/null || :
+    nft add element ip6 "$1-fwmark" blackhole { $((0xFF000000 + i)) : \
+        "${verdict}" } >&/dev/null || :
+
+    # If there is a new network that should be routed through this tunnel,
+    # configure that now.
+    if [[ "${parameters}" =~ ^"reverse="(.*) ]]; then
+      for addr in ${BASH_REMATCH[1]//,/ }; do
+        [[ "${a}" =~ ":" ]] &&
+          ip route add "${addr}" dev "${ifc}" >&/dev/null || :
+      done
+    fi
+  }
+done <"$2"

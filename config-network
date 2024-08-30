@@ -1,0 +1,137 @@
+#!/bin/bash
+
+[ -r "/etc/wireguard/$1.init" ] && . "/etc/wireguard/$1.init"
+
+case "$2" in
+  up)
+    # We moved configuration out of the *.conf into the *.init file.
+    # That allows us to restrict local configuration data to just
+    # *.init and *.peers.
+    if [ -z "${privatekey}" -a ! -r "/etc/wireguard/$1.key" ]; then
+      # A private key can be specified in the *.init file, or if it can't
+      # be found, then it will be generated on the first run of this script.
+      (umask 077; wg genkey >"/etc/wireguard/$1.key")
+    fi
+    wg set "$1" private-key <([ -n "${privatekey}" ] && echo "${privatekey}" ||
+                              cat /etc/wireguard/"$1".key)
+    [ -n "${listenport}" ] && wg set "$1" listen-port "${listenport}"
+    for a in ${address//,/ }; do
+      ip address add "${a}" dev "$1" >&/dev/null || :
+    done
+
+    # For IPv4, we must set per-interface forwarding permissions.
+    # We can then also enable proxy ARP, allowing us to issue
+    # IP addresses that are shared with the LAN network.
+    def="$(ip r |
+           sed 's/^default.* dev \([^ ]\+\).* metric \([^ ]\+\).*/\2 \1/;t;d' |
+           sort -n |
+           awk '1{ print $2 }')"
+    echo 1 >/proc/sys/net/ipv4/conf/"$1"/forwarding
+    echo 1 >/proc/sys/net/ipv4/conf/"$1"/proxy_arp
+    echo 1 >/proc/sys/net/ipv4/conf/"${def}"/forwarding
+    echo 1 >/proc/sys/net/ipv4/conf/"${def}"/proxy_arp
+    echo 0 >/proc/sys/net/ipv4/conf/all/rp_filter
+    echo 2 >/proc/sys/net/ipv4/conf/"$1"/rp_filter
+
+    # Masquerade source addresses that can't be handled by proxy ARP.
+    localnet="$(ip -4 a s dev "${def}" |
+                sed 's/.*inet\s\+\(\S*\).*/\1/;t;d' |
+                xargs printf '%s,' |
+                sed 's/,$//')"
+    nft -f- <<-EOF
+      table ip $1-nat {
+        chain postrouting {
+          type nat hook postrouting priority srcnat; policy accept;
+          oifname "${def}" ip saddr != { ${localnet} } counter masquerade
+        }
+      }
+	EOF
+
+    # IPv6 is a little different. We have to set global forwarding
+    # permissions. If we wanted to restrict forwarding in a more
+    # fine-grained fashion, then that would have to be done with
+    # firewall rules.
+    # We also unfortunately can't use proxy ARP, as we don't get
+    # a static IPv6 prefix from our ISP. That means, we have to use
+    # ULA addresses from fc00::/7 instead. And those don't quite
+    # handle the same as IPv4's private addresses. So, masquerading
+    # is in order.
+    echo 1 >/proc/sys/net/ipv6/conf/all/forwarding
+    echo 1 >/proc/sys/net/ipv6/conf/"$1"/forwarding
+    echo 1 >/proc/sys/net/ipv6/conf/"${def}"/forwarding
+
+    # Configure masquerading for the IPv6 ULA addresses.
+    nft -f- <<-EOF
+      table ip6 $1-nat {
+        chain postrouting {
+          type nat hook postrouting priority srcnat; policy accept;
+          oifname "${def}" counter masquerade
+        }
+      }
+	EOF
+
+    # Mark all incoming packets with a firewall mark.
+    for ip in 4 6; do
+      fam=ip${ip//4/}
+      nft -f- <<-EOF
+        table ${fam} $1-fwmark {
+          map ifc2mark {
+            type ifname : mark
+            counter
+          }
+          map addr2mark {
+            type ipv${ip}_addr : mark
+            flags interval
+            counter
+          }
+          map blackhole {
+            type mark : verdict
+            counter
+            elements = { 0 : accept }
+          }
+          chain target {
+            type filter hook prerouting priority -401; policy accept;
+            iifname "$1" meta mark set ${fam} saddr map @addr2mark counter
+          }
+          chain block-escaped {
+            type filter hook forward priority -401; policy accept;
+            oifname "${def}" counter meta mark vmap @blackhole
+            oifname "${def}" counter drop
+          }
+          chain track {
+            type filter hook prerouting priority -100; policy accept;
+            ct direction original ct mark set iifname map @ifc2mark counter
+            ct mark != 0 ct direction reply meta mark set ct mark counter
+          }
+        }
+	EOF
+    done
+    ;;
+  down)
+    # Undo global configuration changes, but only touch the ones for
+    # our own WireGuard interface. We don't want to step on changes
+    # made for other interfaces that might be present.
+    echo 0 >/proc/sys/net/ipv4/conf/"$1"/forwarding
+    echo 0 >/proc/sys/net/ipv4/conf/"$1"/proxy_arp
+    echo 0 >/proc/sys/net/ipv6/conf/"$1"/forwarding
+
+    # Delete all rules associated with our WireGuard interface
+    nft list ruleset | sed '/^table /!d;s/\s*{$//' | while read -r t; do
+      [[ "${t##* }" =~ ^"$1-" ]] || continue
+      nft delete $t
+    done
+
+    # Delete auxiliary interfaces used for reverse connections
+    ip link show type wireguard | while read -r _ ifc _; do
+      [[ "${ifc}" =~ ^"$1p".*":"$ ]] &&
+        ip link del dev "${BASH_REMATCH[0]}" >&/dev/null || :
+    done
+
+    # Delete policy routing
+    ip rule show | grep "$(printf 'from all fwmark 0xff%02x' ${ifc#wg})" |
+      while read -r i x; do
+        ip rule del priority ${i%:*} >&/dev/null || :
+        ip route flush table ${x##* } >&/dev/null || :
+      done
+    ;;
+esac

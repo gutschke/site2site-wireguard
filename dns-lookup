@@ -1,0 +1,21 @@
+#!/bin/bash
+# You should regularly run this script from a cron job. It keeps outgoing
+# tunnels active, even if dynamic IP addresses change
+export LC_ALL=C
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+for ifc in $(wg show interfaces); do
+  [ -r "/etc/wireguard/${ifc}.peers" ] || continue
+  i=0
+  while read -r l; do
+    i=$((i+1))
+    IFS=, l=($l)
+    key="$(wg pubkey <<<${l[1]# })"
+    if [[ "${l[2]}" =~ ^' '*"endpoint="(.*) ]]; then
+      wg set "${ifc}p${i}" \
+         peer "${key}" \
+         endpoint "${BASH_REMATCH[1]}" >&/dev/null || :
+      ping -W0.001 -c1 -I "${ifc}p${i}" 1.1.1.1 >&/dev/null || :
+    fi
+  done <"/etc/wireguard/${ifc}.peers"
+done

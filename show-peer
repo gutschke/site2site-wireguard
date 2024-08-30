@@ -1,0 +1,133 @@
+#!/bin/bash
+
+# Usage: {[sel]} [ifc] [peers file]
+
+# The first argument can be a selector to choose a particular
+# peer. It must not match the name of a WireGuard interface
+sel=
+if [ -n "$1" ]; then
+  ifcs="$(wg show interfaces)"
+  if ! [[ "$1" =~ ^${ifcs// /|}$ ]]; then
+    sel="$1"
+    shift
+  fi
+fi
+
+# The next (optional) argument is the name of the WireGuard interface
+ifc="${1:-wg0}"
+
+# The final argument is the definition of the peers
+peers="${2:-/etc/wireguard/${ifc}.peers}"
+
+# Public endpoint must be defined statically
+[ -r "/etc/wireguard/${ifc}.init" ] && . "/etc/wireguard/${ifc}.init"
+endpoint="${endpoint:-$(hostname -d)}"
+
+# Display the configuration for a particular peer
+config() {
+  local qr="[Interface]
+# ${1}
+Address = ${2}
+PrivateKey = ${3}${7:+
+DNS = $7}${8:+
+ListenPort = $8}
+
+[Peer]
+PublicKey = ${4}${5:+
+EndPoint = $5}${6:+
+AllowedIPs = $6}
+PersistentKeepalive = 25"
+  echo "${qr}"
+  echo
+  if tty <&1 >&/dev/null; then
+    qrencode -t ansiutf8 <<<"${qr}"
+    echo
+    echo
+  fi
+}
+
+# Find all the addresses assigned to our WireGuard interface
+addrs=
+while read _ _ _ addr _; do
+  eval $(ipcalc-ng -a "${addr}")
+  addrs="${addrs}, $(sed 's/\([.:]\)[^.:]*$/\1$i/' <<<"${ADDRESS}")"
+done < <(ip -o a s dev "${ifc}")
+
+# Find the server's public key and port
+conf="$(wg showconf "${ifc}")"
+srvprivkey="$(sed -n '/\[Interface\]/,/^$/{s/PrivateKey\s*=\s*//;t1;d;:1;p;q}' \
+              <<<"${conf}")"
+srvkey="$(wg pubkey <<<"${srvprivkey}")"
+port="$(sed -n '/\[Interface\]/,/^$/{s/ListenPort\s*=\s*//;t1;d;:1;p;q}' \
+              <<<"${conf}")"
+
+# Parse the definition of the peers
+i=0
+while read -r x; do
+  x="$(sed 's/\s*#.*$//;s/^\s*//' <<<"${x}")"
+  [ -n "${x}" ] || continue
+  name="$(sed 's/^\s*//;s/\s*$//' <<<"${x%%,*}")"
+  key="$(sed 's/^\s*//;s/,.*//;s/\s*$//' <<<"${x#*,}")"
+  parameters="$(sed 's/^[^,]*,\?//;s/^\s*//;s/\s*$//' <<<"${x#*,}")"
+  i=$((i+1))
+  pubkey=
+  allowedips=
+  persistent=
+  mykey="${srvkey}"
+  # Regular peers are added to the main wgX interface, whereas tunnels
+  # connecting two networks make use of an auxiliary wgXpY network interface.
+  # These interfaces have unique private keys that are derived from the
+  # private key assigned to wgX interface. That helps with cryptographic-
+  # key-routing.
+  { if [[ "${parameters}" =~ ^"reverse"   ]] ||
+       [[ "${parameters}" =~ ^"endpoint=" ]]; then
+      mykey="$(openssl dgst -binary -sha256 <<<"${srvprivkey}${ifc}p${i}" |
+               openssl base64 | wg pubkey)"
+      wg showconf "${ifc}p${i}"
+    else
+      wg showconf "${ifc}"
+    fi
+    echo "[Peer]"
+  } | while read -r l; do
+    case "${l%% *}" in
+      'PublicKey') pubkey="${l##* }" ;;
+      'AllowedIPs') allowedips="${l#* = }" ;;
+      'PersistentKeepalive') persistent="${l##* }" ;;
+      '[Peer]')
+        # The *.peers file only contains some of the information that we
+        # want. We retrieve the additional data from the life settings on
+        # our WireGuard interface as reported by "wg showconf ${ifc}".
+        # Matching of the relevant entry happens by checking the public key.
+        if [ "x${pubkey}" = "x$(wg pubkey <<<"${key}")" ]; then
+          # We can either report on all peers or just on the one selected
+          # by the commandline arguments.
+          if [ -z "${sel}" -o "${sel}" = "${name}" -o "${sel}" = "${key}" -o \
+                  "${sel}" = "${pubkey}" -o "${sel}" = "${i}" ]; then
+            # In order to avoid renumbering of peers and IP addresses, we
+            # don't remove entries from the *.peers file, but instead blank
+            # them out. These placeholders have to be skipped when showing
+            # all active peers.
+            [ "${name}" = "DELETED" ] || {
+              dns=
+              netw=
+              if [[ "${parameters}" =~ ^"endpoint=" ]] ||
+                 [[ "${parameters}" =~ ^"reverse"(=.*)? ]]; then
+                netw="${BASH_REMATCH[1]#=}"
+                eval allowedips="\"${addrs#, }\""
+                p=$((port+i))
+              else
+                netw="0.0.0.0/0, ::/0"
+                p="${port}"
+                dns="1.1.1.1"
+              fi
+              [[ "${parameters}" =~ ^"endpoint=".*:(.*) ]] &&
+                dest= || { dest="${endpoint}:${p}"; p=; }
+              config "${name}" "${allowedips}" "${key}" "${mykey}" \
+                     "${dest}" "${netw}" "${dns}" "${BASH_REMATCH[1]}"
+            }
+          fi
+        fi
+        ;;
+    esac
+  done
+done <"${peers}"

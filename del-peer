@@ -1,0 +1,55 @@
+#!/bin/bash -e
+
+# Usage: [sel] [ifc] [peers file]
+
+# The first argument is a selector to choose a particular
+# peer.
+sel="$1"; shift
+
+# The next (optional) argument is the name of the WireGuard interface
+ifc="${1:-wg0}"
+
+# The final argument is the definition of the peers
+peers="${2:-/etc/wireguard/${ifc}.peers}"
+
+# Parse the definition of the peers
+conf="$(wg showconf "${ifc}")"
+umask 077
+i=0
+while read -r x_; do
+  x="$(sed 's/\s*#.*$//;s/^\s*//' <<<"${x_}")"
+  [ -n "${x}" ] || { printf '%s\n' "${x_}"; continue; }
+  name="$(sed 's/^\s*//;s/\s*$//' <<<"${x%%,*}")"
+  key="$(sed 's/^\s*//;s/,.*//;s/\s*$//' <<<"${x#*,}")"
+  parameters="$(sed 's/^[^,]*,\?//;s/^\s*//;s/\s*$//' <<<"${x#*,}")"
+  i=$((i+1))
+  pubkey=
+  allowedips=
+  persistent=
+  while read -r l; do
+    case "${l%% *}" in
+      'PublicKey') pubkey="${l##* }" ;;
+      'AllowedIPs') allowedips="${l#* = }" ;;
+      'PersistentKeepalive') persistent="${l##* }" ;;
+      '[Peer]')
+        idx="$(sed 's/.*[.:]\([^/]*\).*/\1/' <<<"${allowedips}")"
+        if [ "x${pubkey}" = "x$(wg pubkey <<<"${key}")" ]; then
+          if [ "${sel}" = "${name}" -o "${sel}" = "${key}" -o \
+               "${sel}" = "${pubkey}" -o "${sel}" = "${idx}" ]; then
+            echo "DELETED, INVALID"
+            wg set "${ifc}" peer "${pubkey}" remove
+            ip link del dev "${ifc}p${i}" >&/dev/null || :
+          else
+            printf '%s\n' "${x_}"
+          fi
+          continue 2
+        fi
+        ;;
+    esac
+  done <<<"${conf}
+[Peer]"
+  printf '%s\n' "${x_}"
+done <"${peers}" >"${peers}~"
+sed -i '${/^DELETED/d}' "${peers}~"
+cmp "${peers}" "${peers}~" >&/dev/null || {
+  cat "${peers}~" >"${peers}"; rm -f "${peers}~"; }
