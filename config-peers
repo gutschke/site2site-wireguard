@@ -124,6 +124,8 @@ while read -r x; do
     if [[ "${parameters}" =~ ^"target="   ]] ||
        [[ "${parameters}" =~ ^"endpoint=" ]] ||
        [[ "${parameters}" =~ ^"reverse"   ]]; then
+      conntrack -D -f ipv4 -m "${mark}" >&/dev/null || :
+      conntrack -D -f ipv6 -m "${mark}" >&/dev/null || :
       ip -4 rule del fwmark "${mark}" lookup "${table}" >&/dev/null || :
       ip -6 rule del fwmark "${mark}" lookup "${table}" >&/dev/null || :
       ip -4 rule add fwmark "${mark}" lookup "${table}"

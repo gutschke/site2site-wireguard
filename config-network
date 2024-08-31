@@ -127,11 +127,16 @@ case "$2" in
         ip link del dev "${BASH_REMATCH[0]}" >&/dev/null || :
     done
 
-    # Delete policy routing
-    ip rule show | grep "$(printf 'from all fwmark 0xff%02x' ${ifc#wg})" |
-      while read -r i x; do
-        ip rule del priority ${i%:*} >&/dev/null || :
-        ip route flush table ${x##* } >&/dev/null || :
-      done
+    # Delete policy routing and obsolete connection-tracking entries
+    for p in 4 6; do
+      ip -"${p}" rule show |
+        grep "$(printf 'from all fwmark 0xff%02x' ${ifc#wg})" |
+        while read -r i x; do
+          [[ "$x" =~ "fwmark"[[:space:]]+([^[:space:]]+) ]] &&
+            conntrack -D -f "ipv${p}" -m "${BASH_REMATCH[1]}" >&/dev/null || :
+          ip -"${p}" rule del priority ${i%:*} >&/dev/null || :
+          ip -"${p}" route flush table ${x##* } >&/dev/null || :
+        done
+    done
     ;;
 esac
