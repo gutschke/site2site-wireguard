@@ -58,6 +58,6 @@ else
   printf "%s, ${key}%s\n" "${name}" "${parameters:+, ${parameters}}" \
          >>"/etc/wireguard/${ifc}.peers"
 fi
-/etc/wireguard/config-all-peers "${ifc}" "/etc/wireguard/${ifc}.peers" <(echo "${key}")
+/etc/wireguard/config-peers "${ifc}" "/etc/wireguard/${ifc}.peers" <(echo "${key}")
 echo
 show-peer "${key}" "${ifc}"
