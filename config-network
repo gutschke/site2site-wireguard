@@ -43,6 +43,7 @@ case "$2" in
         chain postrouting {
           type nat hook postrouting priority srcnat; policy accept;
           oifname "${def}" ip saddr != { ${localnet} } counter masquerade
+          oifname "${def}" ip daddr != { ${localnet} } counter masquerade
         }
       }
 	EOF
