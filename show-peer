@@ -64,6 +64,11 @@ port="$(sed -n '/\[Interface\]/,/^$/{s/ListenPort\s*=\s*//;t1;d;:1;p;q}' \
 # Parse the definition of the peers
 i=0
 while read -r x; do
+  # While the index of the entry in the *.peers file is crucial, we do
+  # allow comments and blank lines. So, the index isn't necessarily the
+  # same thing is the physical line number. This only makes a difference
+  # if the administrator manually edited the *.peers file. The "add-peer"
+  # script never touches nor creates any comments
   x="$(sed 's/\s*#.*$//;s/^\s*//' <<<"${x}")"
   [ -n "${x}" ] || continue
   name="$(sed 's/^\s*//;s/\s*$//' <<<"${x%%,*}")"
@@ -98,7 +103,9 @@ while read -r x; do
         # want. We retrieve the additional data from the life settings on
         # our WireGuard interface as reported by "wg showconf ${ifc}".
         # Matching of the relevant entry happens by checking the public key.
-        if [ "x${pubkey}" = "x$(wg pubkey <<<"${key}")" ]; then
+        [[ "${key}" =~ ^"(pub)" ]] && peerpubkey="${key#(pub)}" \
+                                   || peerpubkey="$(wg pubkey <<<"${key}")"
+        if [ "x${pubkey}" = "x${peerpubkey}" ]; then
           # We can either report on all peers or just on the one selected
           # by the commandline arguments.
           if [ -z "${sel}" -o "${sel}" = "${name}" -o "${sel}" = "${key}" -o \
@@ -122,7 +129,9 @@ while read -r x; do
               fi
               [[ "${parameters}" =~ ^"endpoint=".*:(.*) ]] &&
                 dest= || { dest="${endpoint}:${p}"; p=; }
-              config "${name}" "${allowedips}" "${key}" "${mykey}" \
+              [[ "${key}" =~ ^"(pub)" ]] && k="ENTER SECRET PRIVATE KEY" \
+                                         || k="${key}"
+              config "${name}" "${allowedips}" "${k}" "${mykey}" \
                      "${dest}" "${netw}" "${dns}" "${BASH_REMATCH[1]}"
             }
           fi

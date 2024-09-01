@@ -41,6 +41,16 @@ EOF
     if [[ "${parameters}" =~ "endpoint=" ]]; then
       echo -n "Public key of endpoint: "
       read -r pubkey
+    else
+      cat <<EOF
+You can optionally provide the public key of the peer, if you know it.
+This is more secure, as you don't need to share private keys across devices.
+But it can make key management more difficult and you need to manually
+enter it on the remote system instead of relying on the QR code.
+
+EOF
+      echo -n "Public key of peer: "
+      read -r pubkey
     fi
   fi
   [ -n "${name%% }" ] || continue
@@ -51,7 +61,7 @@ EOF
   break
 done
 
-key="${pubkey:-$(wg genkey)}"
+[ -n "${pubkey}" ] && key="(pub)${pubkey}" || key="$(wg genkey)"
 if grep '^DELETED,' "/etc/wireguard/${ifc}.peers" >&/dev/null; then
   sed -i "0,/^DELETED,/s%^DELETED,.*%${name//%/\%}, ${key}${parameters:+, ${parameters}}%" "/etc/wireguard/${ifc}.peers"
 else

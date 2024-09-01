@@ -36,6 +36,11 @@ done < <(wg showconf "$1")
 i=0
 [ -r "$2" ] || touch "$2"
 while read -r x; do
+  # While the index of the entry in the *.peers file is crucial, we do
+  # allow comments and blank lines. So, the index isn't necessarily the
+  # same thing is the physical line number. This only makes a difference
+  # if the administrator manually edited the *.peers file. The "add-peer"
+  # script never touches nor creates any comments
   x="$(sed 's/\s*#.*$//;s/^\s*//' <<<"${x}")"
   [ -n "${x}" ] || continue
 
@@ -85,9 +90,11 @@ while read -r x; do
                     openssl base64)"
       lp=; ep=; [[ "${parameters}" =~ ^"reverse" ]] &&
         lp="listen-port $((port+i))" || ep="endpoint ${parameters#*=}"
+      [[ "${key}" =~ ^"(pub)" ]] && pubkey="${key#(pub)}" \
+                                 || pubkey="$(wg pubkey <<<"${key}")"
       wg set "${ifc}" ${lp} \
                       private-key <(echo "${derivedkey}") \
-                      peer "$(wg pubkey <<<"${key}")" \
+                      peer "${pubkey}" \
                       ${ep} \
                       persistent-keepalive 50 \
                       allowed-ips 0.0.0.0/0,::/0
@@ -104,6 +111,8 @@ while read -r x; do
     else
       # A regular peer is much easier to configure. It uses the primary "wgX"
       # interface and only needs to add a new peer definition for each tunnel.
+      [[ "${key}" =~ ^"(pub)" ]] && pubkey="${key#(pub)}" \
+                                 || pubkey="$(wg pubkey <<<"${key}")"
       wg set "${ifc}" peer "$(wg pubkey <<<"${key}")" \
                       persistent-keepalive 50 \
                       allowed-ips "${a}"
