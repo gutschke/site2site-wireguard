@@ -10,7 +10,9 @@ for ifc in $(wg show interfaces); do
   while read -r l; do
     i=$((i+1))
     IFS=, l=($l)
-    key="$(wg pubkey <<<${l[1]# })"
+    key="${l[1]# }"
+    [[ "${key}" =~ ^"(pub)" ]] && key="${key#(pub)}" ||
+      key="$(wg pubkey <<<${key})"
     if [[ "${l[2]}" =~ ^' '*"endpoint="(.*) ]]; then
       wg set "${ifc}p${i}" \
          peer "${key}" \
