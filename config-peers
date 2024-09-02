@@ -89,7 +89,8 @@ while read -r x; do
       derivedkey="$(openssl dgst -binary -sha256 <<<"${privkey}${ifc}" |
                     openssl base64)"
       lp=; ep=; [[ "${parameters}" =~ ^"reverse" ]] &&
-        lp="listen-port $((port+i))" || ep="endpoint ${parameters#*=}"
+        lp="listen-port $((port+i))" || {
+        ep="endpoint ${parameters#*=}"; ep="${ep%%,*}"; }
       [[ "${key}" =~ ^"(pub)" ]] && pubkey="${key#(pub)}" \
                                  || pubkey="$(wg pubkey <<<"${key}")"
       wg set "${ifc}" ${lp} \
@@ -149,7 +150,8 @@ while read -r x; do
 
     # If there is a new network that should be routed through this tunnel,
     # configure that now.
-    if [[ "${parameters}" =~ ^"reverse="(.*) ]]; then
+    if [[ "${parameters}" =~ ^"reverse="(.*) ]] ||
+       [[ "${parameters}" =~ ^"endpoint="[^,]*,(.*) ]]; then
       for addr in ${BASH_REMATCH[1]//,/ }; do
         [[ "${a}" =~ ":" ]] &&
           ip route add "${addr}" dev "${ifc}" >&/dev/null || :

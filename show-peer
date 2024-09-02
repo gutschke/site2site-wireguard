@@ -117,9 +117,9 @@ while read -r x; do
             [ "${name}" = "DELETED" ] || {
               dns=
               netw=
-              if [[ "${parameters}" =~ ^"endpoint=" ]] ||
+              if [[ "${parameters}" =~ ^"endpoint="[^,]*(,[^,]*)? ]] ||
                  [[ "${parameters}" =~ ^"reverse"(=.*)? ]]; then
-                netw="${BASH_REMATCH[1]#=}"
+                netw="${BASH_REMATCH[1]#[=,]}"
                 eval allowedips="\"${addrs#, }\""
                 p=$((port+i))
               else
@@ -127,10 +127,10 @@ while read -r x; do
                 p="${port}"
                 dns="1.1.1.1"
               fi
-              [[ "${parameters}" =~ ^"endpoint=".*:(.*) ]] &&
-                dest= || { dest="${endpoint}:${p}"; p=; }
               [[ "${key}" =~ ^"(pub)" ]] && k="ENTER SECRET PRIVATE KEY" \
                                          || k="${key}"
+              [[ "${parameters}" =~ ^"endpoint="[^,]*:([^,]*) ]] &&
+                dest= || { dest="${endpoint}:${p}"; p=; }
               config "${name}" "${allowedips}" "${k}" "${mykey}" \
                      "${dest}" "${netw}" "${dns}" "${BASH_REMATCH[1]}"
             }

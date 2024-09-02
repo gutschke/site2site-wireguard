@@ -36,7 +36,7 @@ Leave parameters blank for regular incoming tunnels that should use our
 default route.
 
 EOF
-    echo -n "Parameters (reverse{=default-route}, endpoint=..., target=...): "
+    echo -n "Parameters (reverse{=default-route}, endpoint=host:port{,route} target=...): "
     read -r parameters
     if [[ "${parameters}" =~ "endpoint=" ]]; then
       echo -n "Public key of endpoint: "
@@ -62,6 +62,7 @@ EOF
 done
 
 [ -n "${pubkey}" ] && key="(pub)${pubkey}" || key="$(wg genkey)"
+umask 077
 if grep '^DELETED,' "/etc/wireguard/${ifc}.peers" >&/dev/null; then
   sed -i "0,/^DELETED,/s%^DELETED,.*%${name//%/\%}, ${key}${parameters:+, ${parameters}}%" "/etc/wireguard/${ifc}.peers"
 else

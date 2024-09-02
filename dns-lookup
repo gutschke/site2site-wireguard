@@ -16,7 +16,7 @@ for ifc in $(wg show interfaces); do
     if [[ "${l[2]}" =~ ^' '*"endpoint="(.*) ]]; then
       wg set "${ifc}p${i}" \
          peer "${key}" \
-         endpoint "${BASH_REMATCH[1]}" >&/dev/null || :
+         endpoint "${BASH_REMATCH[1]%%,*}" >&/dev/null || :
       ping -W0.001 -c1 -I "${ifc}p${i}" 1.1.1.1 >&/dev/null || :
     fi
   done <"/etc/wireguard/${ifc}.peers"
