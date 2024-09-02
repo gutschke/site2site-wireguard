@@ -27,7 +27,7 @@ case "$2" in
       def="$(ip r |
              sed 's/^default.* dev \([^ ]\+\).* metric \([^ ]\+\).*/\2 \1/;t;d'|
              sort -n |
-             awk '1{ print $2 }')"
+             awk 'NR==1{ print $2 }')"
       [ -z "${def}" ] || break
       read -t10 < <(ip monitor)
     done
