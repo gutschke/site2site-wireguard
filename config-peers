@@ -153,8 +153,7 @@ while read -r x; do
     if [[ "${parameters}" =~ ^"reverse="(.*) ]] ||
        [[ "${parameters}" =~ ^"endpoint="[^,]*,(.*) ]]; then
       for addr in ${BASH_REMATCH[1]//,/ }; do
-        [[ "${a}" =~ ":" ]] &&
-          ip route add "${addr}" dev "${ifc}" >&/dev/null || :
+        ip route add "${addr}" dev "${ifc}" >&/dev/null || :
       done
     fi
   }
