@@ -74,38 +74,40 @@ case "$2" in
     # Mark all incoming packets with a firewall mark.
     for ip in 4 6; do
       fam=ip${ip//4/}
-      nft -f- <<-EOF
-        table ${fam} $1-fwmark {
-          map ifc2mark {
-            type ifname : mark
-            counter
+      for c in counter ''; do
+        { nft -f- 2>/dev/null && break || :; } <<-EOF
+          table ${fam} $1-fwmark {
+            map ifc2mark {
+              type ifname : mark
+              ${c}
+            }
+            map addr2mark {
+              type ipv${ip}_addr : mark
+              flags interval
+              ${c}
+            }
+            map blackhole {
+              type mark : verdict
+              ${c}
+              elements = { 0 : accept }
+            }
+            chain target {
+              type filter hook prerouting priority -401; policy accept;
+              iifname "$1" meta mark set ${fam} saddr map @addr2mark counter
+            }
+            chain block-escaped {
+              type filter hook forward priority -401; policy accept;
+              oifname "${def}" counter meta mark vmap @blackhole
+              oifname "${def}" counter drop
+            }
+            chain track {
+              type filter hook prerouting priority -100; policy accept;
+              ct direction original ct mark set iifname map @ifc2mark counter
+              ct mark != 0 ct direction reply meta mark set ct mark counter
+            }
           }
-          map addr2mark {
-            type ipv${ip}_addr : mark
-            flags interval
-            counter
-          }
-          map blackhole {
-            type mark : verdict
-            counter
-            elements = { 0 : accept }
-          }
-          chain target {
-            type filter hook prerouting priority -401; policy accept;
-            iifname "$1" meta mark set ${fam} saddr map @addr2mark counter
-          }
-          chain block-escaped {
-            type filter hook forward priority -401; policy accept;
-            oifname "${def}" counter meta mark vmap @blackhole
-            oifname "${def}" counter drop
-          }
-          chain track {
-            type filter hook prerouting priority -100; policy accept;
-            ct direction original ct mark set iifname map @ifc2mark counter
-            ct mark != 0 ct direction reply meta mark set ct mark counter
-          }
-        }
 	EOF
+      done
     done
     ;;
   down)
